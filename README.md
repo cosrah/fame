@@ -1,5 +1,5 @@
 # What is FAME ?
-
+ 
 FAME is a recursive acronym meaning “FAME Automates Malware Evaluation”.
 
 It is meant to facilitate analysis of malicious files, leveraging as much knowledge as possible in order to speed up and automate end-to-end analysis.
