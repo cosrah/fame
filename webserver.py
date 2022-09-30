@@ -9,6 +9,7 @@ from flask_login import LoginManager
 from werkzeug.urls import url_encode
 from importlib import import_module
 
+from urllib.parse import urljoin
 from fame.core import fame_init
 from fame.core.user import User
 from fame.common.config import fame_config
@@ -19,7 +20,7 @@ from web.views.modules import ModulesView
 from web.views.search import SearchView
 from web.views.configs import ConfigsView
 from web.views.users import UsersView
-from web.views.helpers import user_if_enabled
+from web.views.helpers import user_if_enabled, disconnect_if_inactive
 
 try:
     fame_init()
@@ -29,6 +30,8 @@ except:
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
 app.secret_key = fame_config.secret_key
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+if 'https://' in fame_config.fame_url:
+    app.config['SESSION_COOKIE_SECURE'] = True
 
 # Set two tempalte folders (one is for modules)
 template_loader = jinja2.ChoiceLoader([
@@ -48,7 +51,7 @@ app.register_blueprint(auth_module.auth)
 
 @login_manager.user_loader
 def load_user(token):
-    return user_if_enabled(User.get(auth_token=token))
+    return disconnect_if_inactive(user_if_enabled(User.get(auth_token=token)))
 
 
 @login_manager.request_loader
@@ -150,7 +153,7 @@ def modify_query(key, value):
 
 @app.route('/')
 def root():
-    return redirect('/analyses')
+    return redirect(urljoin(fame_config.fame_url, '/analyses/'))
 
 
 FilesView.register(app)

@@ -1,15 +1,13 @@
 import os
 import sys
 import errno
-from urllib.parse import quote_plus
 from urllib.parse import urljoin
-from subprocess import call
+from subprocess import run, PIPE
 
 sys.path.append(os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 
-from utils import user_input, error
+from utils import user_input, error, get_new_password
 from fame.common.constants import FAME_ROOT
-from fame.common.pip import pip_install
 
 
 class Templates:
@@ -49,9 +47,18 @@ def test_mongodb_connection(db):
 def define_mongo_connection(context):
     from pymongo import MongoClient
 
-    context['mongo_host'] = user_input("MongoDB host", "localhost")
-    context['mongo_port'] = int(user_input("MongoDB port", "27017"))
-    context['mongo_db'] = user_input("MongoDB database", "fame")
+    context['mongo_host'] = os.environ.get('MONGODB_HOST', "localhost")
+    context['mongo_port'] = int(os.environ.get("MONGODB_PORT", 27017))
+    context['mongo_db'] = os.environ.get("MONGO_INITDB_DATABASE", "fame")
+    context['mongo_user'] = os.environ.get("MONGODB_USERNAME", '')
+    context['mongo_password'] = os.environ.get("MONGODB_PASSWORD", '')
+
+    if context['interactive']:
+        context['mongo_host'] = user_input("MongoDB host", context['mongo_host'])
+        context['mongo_port'] = int(user_input("MongoDB port", context['mongo_port']))
+        context['mongo_db'] = user_input("MongoDB database", context['mongo_db'])
+        context['mongo_user'] = user_input("MongoDB username", context['mongo_user'])
+        context['mongo_password'] = user_input("MongoDB password", context['mongo_password'])
 
     try:
         mongo = MongoClient(context['mongo_host'], context['mongo_port'], serverSelectionTimeoutMS=10000)
@@ -61,13 +68,15 @@ def define_mongo_connection(context):
         print(e)
         error("Could not connect to MongoDB.")
 
-    context['mongo_user'] = ''
-    context['mongo_password'] = ''
     if not test_mongodb_connection(db):
-        context['mongo_user'] = user_input("MongoDB username")
-        context['mongo_password'] = user_input("MongoDB password")
         try:
-            db.authenticate(context['mongo_user'], quote_plus(context['mongo_password']))
+            mongo = MongoClient(host=context['mongo_host'],
+                port=context['mongo_port'],
+                serverSelectionTimeoutMS=10000,
+                username=context['mongo_user'],
+                password=context['mongo_password'],
+                authSource="fame")
+            db = mongo[context['mongo_db']]
         except:
             error("Could not connect to MongoDB (invalid credentials).")
 
@@ -75,39 +84,54 @@ def define_mongo_connection(context):
             error("MongDB user has insufficient privileges.")
 
 
-def define_installation_type(context):
-    print("\nChoose your installation type:\n")
-    print(" - 1: Web server + local worker")
-    print(" - 2: Remote worker\n")
-
-    itype = user_input("Installation type", "1", ["1", "2"])
-    if itype == "1":
-        context['installation_type'] = 'local'
-    else:
-        context['installation_type'] = 'remote'
-
-
 def generate_ssh_key():
     key_path = os.path.join(FAME_ROOT, 'conf', 'id_rsa')
     if os.path.exists(key_path):
         print("[+] SSH key already exists.")
     else:
-        print("[+] Generating SSH key ...")
-        try:
-            call(['ssh-keygen', '-q', '-t', 'rsa', '-b', '4096', '-C', 'FAME deploy key', '-f', key_path, '-N', ''])
-        except Exception:
-            error("Could not generate SSH key (missing 'ssh-keygen' ?)", exit=False)
+        if os.environ.get("FAME_GIT_SSH_KEY", ''):
+            print("[+] installing provided SSH key ...")
+            key_file = open(key_path, "w+")
+            key_file.write(os.environ.get("FAME_GIT_SSH_KEY", '').replace("\\n", "\n"))
+            key_file.close()
+            os.chmod(key_path, 0o600)
+
+            try:
+                pubkey = run(['ssh-keygen','-y', '-C', 'FAME deploy key', '-f', key_path], stdout=PIPE)
+            except Exception:
+                error("Could not generate SSH key (missing 'ssh-keygen' ? Invalid key?)", exit=False)
+
+            if pubkey:
+                pubkey_file = open(key_path + '.pub', 'w+')
+                pubkey_file.write(pubkey.stdout.decode())
+                pubkey_file.close()
+        else:
+            print("[+] Generating SSH key ...")
+            try:
+                run(['ssh-keygen', '-q', '-t', 'rsa', '-b', '4096', '-C', 'FAME deploy key', '-f', key_path, '-N', ''])
+            except Exception:
+                error("Could not generate SSH key (missing 'ssh-keygen' ?)", exit=False)
 
 
-def create_admin_user():
+def create_admin_user(context):
     from fame.core.store import store
-    from utils.create_user import create_user
+    from web.auth.user_password.user_management import create_user
 
-    if store.users.count():
+    if store.users.count_documents({}):
         print("[+] There are already users in the database.")
     else:
         print("[+] Creating first user (as administrator) ...")
-        create_user(admin=True)
+        default_user_email = os.environ.get("DEFAULT_EMAIL", "admin@changeme.fame")
+        default_user_password = os.environ.get("DEFAULT_PASSWORD", '')
+        if context['interactive']:
+            default_user_email = user_input("User email address:", default_user_email)
+            if not default_user_password:
+                default_user_password = get_new_password()
+
+        if not default_user_password:
+            error("Error: No password given for the default account. Did you set DEFAULT_EMAIL / DEFAULT_PASSWORD ?")
+
+        create_user("Admin", default_user_email, ['*', 'cert'], ["cert"], ['*'], default_user_password)
 
 
 def add_community_repository():
@@ -123,7 +147,8 @@ def add_community_repository():
             'name': 'community',
             'address': 'https://github.com/certsocietegenerale/fame_modules.git',
             'private': False,
-            'status': 'cloning'
+            'status': 'cloning',
+            'branch': 'master'
         })
         repo.save()
         repo.do_clone()
@@ -132,7 +157,9 @@ def add_community_repository():
 def perform_local_installation(context):
     templates = Templates()
 
-    context['fame_url'] = user_input("FAME's URL for users (e.g. https://fame.yourdomain/)")
+    context['fame_url'] = os.environ.get("FAME_URL", "http://localhost")
+    if context['interactive']:
+        context['fame_url'] = user_input("FAME's URL for worker", context['fame_url'])
     print("[+] Creating configuration file ...")
     context['secret_key'] = os.urandom(64).hex()
     templates.save_to(os.path.join(FAME_ROOT, 'conf', 'fame.conf'), 'local_fame.conf', context)
@@ -140,12 +167,13 @@ def perform_local_installation(context):
     generate_ssh_key()
 
     from fame.core import fame_init
+    from web.auth.user_password.user_management import create_user
     fame_init()
     print("[+] Creating initial data ...")
     from utils.initial_data import create_initial_data
     create_initial_data()
 
-    create_admin_user()
+    create_admin_user(context)
     add_community_repository()
 
 
@@ -167,7 +195,7 @@ def create_user_for_worker(context):
 def get_fame_url(context):
     import requests
 
-    context['fame_url'] = user_input("FAME's URL for worker")
+    context['fame_url'] = os.environ.get("FAME_URL", 'http://localhost')
 
     url = urljoin(context['fame_url'], '/modules/download')
     try:
@@ -195,28 +223,34 @@ def perform_remote_installation(context):
     templates.save_to(os.path.join(FAME_ROOT, 'conf', 'fame.conf'), 'remote_fame.conf', context)
 
 
-def install_requirements():
-    print("[+] Installing requirements ...")
-
-    rcode, output = pip_install('-r', os.path.join(FAME_ROOT, 'requirements.txt'))
-
-    if rcode:
-        print(output)
-        error("Could not install requirements.")
-
 
 def main():
     context = {}
 
-    install_requirements()
+    context['interactive'] = True
+    if sys.argv and any([arg == "--not-interactive" for arg in sys.argv]):
+        print("[+] Performing a non-interactive installation")
+        context['interactive'] = False
 
     define_mongo_connection(context)
 
     create_conf_directory()
-    define_installation_type(context)
-    if context['installation_type'] == 'local':
+
+    itype = "1"
+    if sys.argv and any([arg == 'worker' for arg in sys.argv]):
+        itype = "2"
+
+    if context["interactive"]:
+        print("\nChoose your installation type:\n")
+        print(" - 1: Web server + local worker")
+        print(" - 2: Remote worker\n")
+        itype = user_input("Installation type", itype, ["1", "2"])
+
+    if itype == "1":
+        print('[+] performing local install')
         perform_local_installation(context)
     else:
+        print('[+] performing remote install')
         perform_remote_installation(context)
 
 
