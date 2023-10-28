@@ -3,12 +3,12 @@ Installation
 ************
 
 .. note::
-    This page documents how to install FAME on Ubuntu 20.04. FAME being written in Python, you can install it on the system of your choice.
+    This page documents how to install FAME on Ubuntu. FAME being written in Python, you can install it on the system of your choice.
 
 The easy way
 ============
 
-Probably the most easy way to run fame is::
+The most easy way to run FAME is::
 
     $ git clone https://github.com/certsocietegenerale/fame.git
     $ cd fame/docker
@@ -29,8 +29,7 @@ Dependencies
 
 Install dependencies::
 
-    $ sudo apt install git python3-pip python3-dev
-    $ sudo pip3 install virtualenv
+    $ sudo apt install git python3-pip python3-dev python3-virtualenv
 
 MongoDB
 -------
@@ -56,7 +55,7 @@ By default, MongoDB only listens on localhost. If your MongoDB instance is on a 
 
 It is also recommended to enable authentication on the MongoDB server. In order to do this, start by creating an admin user, as well as a user for FAME::
 
-    $ mongo
+    $ mongosh
     > use admin
     switched to db admin
     > db.createUser({ user: "admin", pwd: "SOME_STRONG_PASSWORD", roles: [ { role: "userAdminAnyDatabase", db: "admin" } ] })
@@ -143,23 +142,38 @@ Installation on a production environment
 The commands shown above are good for development environments. In production, you will want to run the web server and the worker as daemons.
 
 .. note::
-    In this paragraph, we will describe how to set up FAME in production environments on Ubuntu 20.04, using nginx, uwsgi and systemd. If your setup differs, you will have to adapt these instructions.
+    In this paragraph, we will describe how to set up FAME in production environments on Ubuntu, using nginx, gunicorn and systemd. If your setup differs, you will have to adapt these instructions.
 
 Register the web server and the worker as services
 --------------------------------------------------
 
-Install uwsgi::
+Install gunicorn::
 
-    $ sudo pip3 install uwsgi
+    $ cd /REPLACE/WITH/YOUR/PATH/fame
+    $ source env/bin/activate
+    $ pip3 install gunicorn
 
 Create a systemd configuration file for the web server, at `/etc/systemd/system/fame_web.service`::
 
     [Unit]
     Description=FAME web server
+    After = network.target
 
     [Service]
-    Type=simple
-    ExecStart=/bin/bash -c "cd /REPLACE/WITH/YOUR/PATH/fame && uwsgi -H /REPLACE/WITH/YOUR/PATH/fame/env --uid REPLACE_WITH_YOUR_USER --gid REPLACE_WITH_YOUR_USER --socket /tmp/fame.sock --chmod-socket=660 --chown-socket REPLACE_WITH_YOUR_USER:www-data -w webserver --callable app"
+    PermissionsStartOnly = true
+    PIDFile = /run/fame/fame.pid
+    User = REPLACE_WITH_YOUR_USER
+    Group = REPLACE_WITH_YOUR_USER
+    WorkingDirectory = /REPLACE/WITH/YOUR/PATH/fame
+    Environment = "PYTHONUNBUFFERED=TRUE"
+    ExecStartPre = /bin/mkdir /run/fame
+    ExecStartPre = /bin/chown -R REPLACE_WITH_YOUR_USER:REPLACE_WITH_YOUR_USER /run/fame
+    ExecStart = /REPLACE/WITH/YOUR/PATH/fame/env/bin/gunicorn webserver:app -b 127.0.0.1:4200 --pid /run/fame/fame.pid --chdir /REPLACE/WITH/YOUR/PATH/fame --workers=2 --timeout 300 --access-logformat '%({x-forwarded-for}i)s %(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"' --access-logfile -
+    ExecReload = /bin/kill -s HUP $MAINPID
+    ExecStop = /bin/kill -s TERM $MAINPID
+    ExecStopPost = /bin/rm -rf /run/fame
+    PrivateTmp = true
+    StartLimitBurst = 0
 
     [Install]
     WantedBy=multi-user.target
@@ -200,10 +214,6 @@ Remove the default configuration file::
 
 Create the file `/etc/nginx/sites-available/fame` with the following contents::
 
-    upstream fame {
-        server unix:///tmp/fame.sock;
-    }
-
     server {
         listen 80 default_server;
 
@@ -211,8 +221,8 @@ Create the file `/etc/nginx/sites-available/fame` with the following contents::
         client_max_body_size 0;
 
         location / {
-          include uwsgi_params;
-          uwsgi_pass fame;
+          proxy_pass http://127.0.0.1:4200;
+          proxy_set_header X-Forwarded-For $remote_addr;
         }
 
         location /static/ {
@@ -226,6 +236,15 @@ Enable your configuration file, and restart nginx::
 
     $ sudo ln -s /etc/nginx/sites-available/fame /etc/nginx/sites-enabled/fame
     $ sudo systemctl restart nginx
+
+Finally, make sure static files can be read by the nginx user::
+
+    $ sudo chown -R www-data:www-data /REPLACE/WITH/YOUR/PATH/fame/web/static
+    $ sudo usermod -aG $USER www-data
+    $ reboot
+    $ # Depending on the location, you may also have to allow user www-data to access the static folder. If you encounter 403 errors, you should verify if all upstream folders have the group execute permission
+    $ stat -c '%A %n' /REPLACE/WITH
+    drwx------ /REPLACE/WITH # <- x permission on group is missing, you have to chmod g+x /REPLACE/WITH/
 
 .. note::
     In most settings, we recommend updating this configuration to use HTTPS instead of HTTP, but this is not described here as each organization handles certificates differently.
@@ -248,8 +267,7 @@ The installation process for a remote worker is the same, with less steps. You c
 
 Install dependencies::
 
-    $ sudo apt-get install git python-pip
-    $ sudo pip install virtualenv
+    $ sudo apt-get install git python3 python3-pip python3-virtualenv
 
 Clone the repository::
 

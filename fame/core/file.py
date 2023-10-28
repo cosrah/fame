@@ -50,6 +50,7 @@ class File(MongoDict):
             self['owners'] = []
             self['comments'] = []
             self['analysis'] = []
+            self['reviewed'] = None
 
             if hash:
                 self._init_with_hash(hash)
@@ -103,7 +104,10 @@ class File(MongoDict):
             self.existing = True
 
         # If the file doesn't exist, or exists as a hash submission, compute default properties and save
-        if create and ((existing_file is None) or (self['type'] == 'hash')):
+        if create and ((existing_file is None) or (self['type'] == 'hash') or not os.path.isfile(self['filepath'])):
+            # if file exists as hash submission: reset review status
+            if existing_file and self['type'] == 'hash':
+                self.review(None)
             self._store_file(filename, stream)
             self._compute_default_properties()
             self.save()
@@ -185,7 +189,8 @@ class File(MongoDict):
             'modules': modules or [],
             'options': options or {},
             'groups': list(set(groups + self['groups'])),
-            'analyst': analyst
+            'analyst': analyst,
+            'reviewed': self['reviewed'] if 'reviewed' in self else None # We can't use .get() here as it would embed the entire user object
         })
         analysis.save()
 
@@ -198,6 +203,19 @@ class File(MongoDict):
 
     def add_parent_analysis(self, analysis):
         self.append_to('parent_analyses', analysis['_id'])
+
+    def review(self, analyst=None):
+        if analyst is not None:
+            self['reviewed'] = analyst
+        else:
+            self['reviewed'] = None
+        self.save()
+
+        # Update previous analysis
+        for analysis_id in self['analysis']:
+            analysis = Analysis(store.analysis.find_one({'_id': ObjectId(analysis_id)}))
+            analysis['reviewed'] = self['reviewed']
+            analysis.save()
 
     # Update existing record
     def _add_to_previous(self, existing_record, name):

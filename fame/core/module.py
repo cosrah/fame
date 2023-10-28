@@ -343,6 +343,13 @@ class ProcessingModule(Module):
             new_type (string): new FAME file type."""
         self._analysis.change_type(location, new_type)
 
+    def skip_review(self, skip=True):
+        """Skip the review of an analysis.
+
+        Args:
+            skip (optional): True if the analysis review should be skipped, False otherwise."""
+        self._analysis.skip_review(skip)
+
     def add_extracted_file(self, location, automatic_analysis=True):
         """Create a new file that deserves its own analysis.
 
@@ -480,12 +487,16 @@ class ProcessingModule(Module):
         # if 'acts_on' is defined
         if self.info['acts_on']:
             for source_type in iterify(self.info['acts_on']):
-                for target in self._analysis.get_files(source_type):
-                    if self._try_each(target, source_type):
-                        result = True
+                targets = self._analysis.get_files(source_type)
+                if targets:
+                    for target in targets:
+                        if self._try_each(target, source_type):
+                            result = True
         # Otherwise, only run on main target
         else:
-            return self._try_each(self._analysis.get_main_file(), self._analysis._file['type'])
+            main_file = self._analysis.get_main_file()
+            if main_file:
+                return self._try_each(main_file, self._analysis._file['type'])
 
         return result
 
@@ -1153,6 +1164,13 @@ class PreloadingModule(Module):
             for the given hash
         """
         raise NotImplementedError
+
+    def skip_review(self, skip=True):
+        """Skip the review of an analysis.
+
+        Args:
+            skip (optional): True if the analysis review should be skipped, False otherwise."""
+        self._analysis.skip_review(skip)
 
     def add_preloaded_file(self, filepath=None, fd=None):
         self._analysis.add_preloaded_file(filepath, fd)

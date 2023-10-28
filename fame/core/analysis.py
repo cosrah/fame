@@ -5,6 +5,8 @@ import traceback
 from shutil import copy
 from hashlib import md5
 from urllib.parse import urljoin
+from bson.json_util import loads as bson_loads
+from json import dumps
 
 from fame.common.config import fame_config
 from fame.common.utils import iterify, u, send_file_to_remote
@@ -53,6 +55,7 @@ class Analysis(MongoDict):
         self['end_date'] = None
         self['groups'] = []
         self['analyst'] = []
+        self['reviewed'] = None
         MongoDict.__init__(self, values)
 
         self._file = File(store.files.find_one({'_id': self['file']}))
@@ -113,7 +116,7 @@ class Analysis(MongoDict):
         if not f.existing or f['type'] == 'hash':
             if fame_config.remote:
                 response = send_file_to_remote(filepath, '/files/')
-                f = File(response.json()['file'])
+                f = File(bson_loads(dumps(response.json()['file'])))
             else:
                 f = File(filename=os.path.basename(filepath), stream=fd)
 
@@ -139,6 +142,14 @@ class Analysis(MongoDict):
                 self._file.analyze(self['groups'], self['analyst'], None, self['options'])
         else:
             self.log('warning', "Tried to change type of generated file '{}'".format(filepath))
+
+    def skip_review(self, skip=True):
+        if skip and (not 'reviewed' in self._file or self._file['reviewed'] is None):
+            self._file.review(False)
+            self['reviewed'] = False
+        elif not skip and (not 'reviewed' in self._file or not self._file['reviewed']):
+            self._file.review(None)
+            self['reviewed'] = None
 
     def add_support_file(self, module_name, name, filepath):
         self.log('debug', "Adding support file '{}' at '{}'".format(name, filepath))
@@ -274,6 +285,7 @@ class Analysis(MongoDict):
                 was_resumed = True
             except DispatchingException:
                 self.log('warning', 'no preloading module was able to find a file for submitted hash')
+                self.skip_review()
 
                 for module in list(self['waiting_modules']):
                     self._cancel_module(module)
@@ -379,12 +391,20 @@ class Analysis(MongoDict):
 
                 url = urljoin(fame_config.remote, '/analyses/{}/get_file/{}'.format(self['_id'], pathhash))
                 response = requests.get(url, stream=True, headers={'X-API-KEY': fame_config.api_key})
-                response.raise_for_status()
-                f = open(local_path, 'ab')
-                for chunk in response.iter_content(1024):
-                    f.write(chunk)
+                try:
+                    response.raise_for_status()
+                except requests.exceptions.HTTPError:
+                    self.log("error", "File '{0}' not found on disk, unable to analyze it.".format(pathhash))
+                    return False
+                else:
+                    try:
+                        f = open(local_path, 'xb')
+                        for chunk in response.iter_content(1024):
+                            f.write(chunk)
+                        f.close()
+                    except FileExistsError:
+                        pass
 
-                f.close()
 
             return local_path
         else:
@@ -401,10 +421,14 @@ class Analysis(MongoDict):
 
         if file_type in self['generated_files']:
             for filepath in self['generated_files'][file_type]:
-                results.append(self.filepath(filepath))
+                local_filepath = self.filepath(filepath)
+                if local_filepath:
+                    results.append(local_filepath)
 
         if self._file['type'] == file_type:
-            results.append(self.get_main_file())
+            main_file = self.get_main_file()
+            if main_file:
+                results.append(main_file)
 
         return results
 

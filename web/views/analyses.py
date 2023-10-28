@@ -1,4 +1,5 @@
 import os
+import ipaddress
 from io import BytesIO
 from shutil import copyfileobj
 from hashlib import md5
@@ -11,6 +12,7 @@ from flask_login import current_user
 from flask_classful import FlaskView, route
 from flask_paginate import Pagination
 from werkzeug.utils import secure_filename
+from urllib.parse import urlparse
 
 from fame.common.config import fame_config
 from fame.core.module_dispatcher import dispatcher
@@ -66,13 +68,22 @@ class AnalysesView(FlaskView, UIView):
 
         :query page: page number.
         :type page: int
+        :query filter: (optional) set filter. can be "to_review" or "reviewed"
 
         :>json list analyses: list of analyses (see :http:get:`/analyses/(id)` for details on the format of an analysis).
         """
         page = int(request.args.get('page', 1))
 
-        analyses = current_user.analyses.find().sort('_id', DESCENDING).limit(PER_PAGE).skip((page - 1) * PER_PAGE)
-        pagination = Pagination(page=page, per_page=PER_PAGE, total=current_user.analyses.count_documents(), css_framework='bootstrap3')
+        filter_query = {}
+        filter_arg = request.args.get('filter')
+        if current_user.has_permission('review'):
+            if filter_arg == 'reviewed':
+                filter_query = {"reviewed": { "$exists": True, "$nin": [None, False] } }
+            elif filter_arg == 'to_review':
+                filter_query = { "reviewed": { "$exists": True, "$eq": None } }
+
+        analyses = current_user.analyses.find(filter_query).sort('_id', DESCENDING).limit(PER_PAGE).skip((page - 1) * PER_PAGE)
+        pagination = Pagination(page=page, per_page=PER_PAGE, total=current_user.analyses.count_documents(filter_query), css_framework='bootstrap3')
         analyses = {'analyses': clean_analyses(list(analyses))}
         for analysis in analyses['analyses']:
             file = current_user.files.find_one({'_id': analysis['file']})
@@ -81,8 +92,11 @@ class AnalysesView(FlaskView, UIView):
             if 'analyst' in analysis:
                 analyst = store.users.find_one({'_id': analysis['analyst']})
                 analysis['analyst'] = clean_users(analyst)
+            if 'reviewed' in analysis and analysis['reviewed']:
+                reviewer = store.users.find_one({'_id': analysis['reviewed']})
+                analysis['reviewed'] = clean_users(reviewer)
 
-        return render(analyses, 'analyses/index.html', ctx={'data': analyses, 'pagination': pagination})
+        return render(analyses, 'analyses/index.html', ctx={'data': analyses, 'pagination': pagination, "filter": filter_arg})
 
     def get(self, id):
         """Get the analysis with `id`.
@@ -95,6 +109,7 @@ class AnalysesView(FlaskView, UIView):
 
         :>json dict _id: ObjectId dict.
         :>json dict analyst: analyst's ObjectId.
+        :>json dict reviewed: analyst's ObjectId if review has been performed
         :>json dict date: date dict.
         :>json list executed_modules: list of executed modules.
         :>json list pending_modules: list of pending modules.
@@ -287,6 +302,55 @@ class AnalysesView(FlaskView, UIView):
                     return redirect(analysis, url_for('AnalysesView:get', id=analysis['analysis']['_id']))
             else:
                 return render_template('analyses/new.html', options=dispatcher.options)
+
+    @route('/is_safe_url', methods=["POST"])
+    def is_safe_url(self):
+        safe = False
+        url = request.form.get('url', '').strip().strip('/')
+        config = Config.get(name="safe_domains")
+
+        if config and url:
+            config = config.get_values()
+            trusted_domains = [d.strip() for d in config['trusted_domains'].split('\n')]
+            untrusted_domains = [d.strip() for d in config['untrusted_domains'].split('\n')]
+
+            parsed_url = urlparse(url)
+            if not parsed_url.netloc:
+                parsed_url = urlparse("http://" + url)
+            parsed_url = parsed_url.netloc
+            if parsed_url and ':' in parsed_url:
+                # remove port
+                parsed_url = parsed_url.split(':')[0]
+            if parsed_url:
+                for domain in trusted_domains:
+                    try:
+                        safe_ip_range = ipaddress.ip_network(domain)
+                        submitted_ip = ipaddress.ip_address(parsed_url)
+                        if submitted_ip in safe_ip_range:
+                            safe = True
+                    except ValueError:
+                        if domain.startswith('*.'):
+                           if parsed_url.endswith(domain[2:]):
+                               safe = True
+                        else:
+                           if parsed_url == domain:
+                               safe = True
+
+                for domain in untrusted_domains:
+                    try:
+                        safe_ip_range = ipaddress.ip_network(domain)
+                        submitted_ip = ipaddress.ip_address(parsed_url)
+                        if submitted_ip in safe_ip_range:
+                            safe = False
+                    except ValueError:
+                        if domain.startswith('*.'):
+                           if parsed_url.endswith(domain[2:]):
+                               safe = False
+                        else:
+                           if parsed_url == domain:
+                               safe = False
+
+        return jsonify({"is_safe": safe})
 
     @requires_permission("submit_iocs")
     @route('/<id>/submit_iocs/<module>', methods=["POST"])

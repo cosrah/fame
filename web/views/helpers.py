@@ -4,7 +4,7 @@ from flask import make_response, abort, request
 from flask_login import current_user
 from werkzeug.exceptions import Forbidden
 from functools import wraps
-from os.path import basename
+from os.path import basename, isfile
 from datetime import timedelta, datetime
 
 from fame.core.store import store
@@ -16,7 +16,7 @@ from fame.common.config import fame_config
 def remove_field(instance, field):
     try:
         del instance[field]
-    except KeyError:
+    except (KeyError, TypeError):
         pass
 
 
@@ -50,7 +50,7 @@ def clean_analyses(analyses):
 
 
 def enrich_comments(obj):
-    if 'comments' in obj:
+    if 'comments' in obj and isinstance(obj['comments'], list):
         for comment in obj['comments']:
             if 'analyst' in comment:
                 analyst = store.users.find_one({'_id': comment['analyst']})
@@ -119,13 +119,16 @@ def disconnect_if_inactive(user):
 
 
 def file_download(filepath):
-    with open(filepath, 'rb') as fd:
-        response = make_response(fd.read())
+    if not isfile(filepath):
+        abort(404)
+    else:
+        with open(filepath, 'rb') as fd:
+            response = make_response(fd.read())
 
-    response.headers["Content-Disposition"] = "attachment; filename={0}".format(basename(filepath)).encode('latin-1', errors='ignore')
-    response.headers["Content-Type"] = "application/binary"
+        response.headers["Content-Disposition"] = "attachment; filename={0}".format(basename(filepath)).encode('latin-1', errors='ignore')
+        response.headers["Content-Type"] = "application/binary"
 
-    return response
+        return response
 
 
 def get_or_404(objectmanager, *args, **kwargs):
