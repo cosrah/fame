@@ -65,6 +65,7 @@ class Worker:
         self.update_module_requirements()
 
     def update_module_requirements(self):
+        installed = []
         for module in ModuleInfo.get_collection().find():
             module = ModuleInfo(module)
 
@@ -79,15 +80,15 @@ class Worker:
                 should_update = (not fame_config.remote)
 
             if should_update:
-                self.update_python_requirements(module)
-                self.launch_install_scripts(module)
+                installed += self.update_python_requirements(module, installed)
+                installed += self.launch_install_scripts(module, installed)
 
             module.save()
 
-    def update_python_requirements(self, module):
+    def update_python_requirements(self, module, already_installed):
         requirements = self._module_requirements(module)
 
-        if requirements:
+        if requirements and not requirements in already_installed:
             print(("Installing requirements for '{}' ({})".format(module['name'], requirements)))
 
             rcode, output = pip_install('-r', requirements)
@@ -95,11 +96,14 @@ class Worker:
             # In case pip failed
             if rcode:
                 self._module_installation_error(requirements, module, output.decode('utf-8', errors='replace'))
+        return [requirements]
 
-    def launch_install_scripts(self, module):
+    def launch_install_scripts(self, module, already_installed):
         scripts = self._module_install_scripts(module)
 
         for script in scripts:
+            if script in already_installed:
+                continue
             try:
                 print(("Launching installation script '{}'".format(' '.join(script))))
                 check_output(script, stderr=STDOUT)
@@ -107,6 +111,7 @@ class Worker:
                 self._module_installation_error(' '.join(script), module, e.output.decode('utf-8', errors='replace'))
             except Exception as e:
                 self._module_installation_error(' '.join(script), module, e)
+        return scripts
 
     def _module_installation_error(self, cmd, module, errors):
         errors = "{}: error on '{}':\n\n{}".format(cmd, gethostname(), errors)
@@ -142,6 +147,7 @@ class Worker:
     # Delete files older than 7 days and empty directories
     def clean_temp_dir(self):
         current_time = time()
+        self.last_clean = current_time
 
         for root, dirs, files in os.walk(fame_config.temp_path, topdown=False):
             for f in files:
@@ -171,6 +177,9 @@ class Worker:
 
             while True:
                 updates = Internals.get(name='updates')
+                if time() > (self.last_clean + 3600):
+                    self.clean_temp_dir()
+
                 if updates['last_update'] > self.last_run:
                     # Stop running worker
                     os.kill(self.process.pid, signal.SIGTERM)

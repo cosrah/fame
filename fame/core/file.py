@@ -6,11 +6,13 @@ import datetime
 
 from fame.core.store import store
 from fame.common.config import ConfigObject, fame_config
+from fame.common.utils import sanitize_filename
 from fame.common.mongo_dict import MongoDict
 from fame.core.module_dispatcher import dispatcher
 from fame.core.config import Config
 
 from fame.common.email_utils import EmailServer
+from web.views.helpers import get_fame_url
 
 notification_body_tpl = """Hi,
 
@@ -109,7 +111,7 @@ class File(MongoDict):
             if existing_file and self['type'] == 'hash':
                 self.review(None)
             self._store_file(filename, stream)
-            self._compute_default_properties()
+            self._compute_default_properties(filename=filename)
             self.save()
 
     def add_comment(self, analyst_id, comment, analysis_id=None, probable_name=None, notify=None):
@@ -142,7 +144,7 @@ class File(MongoDict):
                 recipients.add(recipient['email'])
         if len(recipients):
             config = Config.get(name="email").get_values()
-            analysis_url = "{0}/analyses/{1}".format(fame_config.fame_url, analysis_id)
+            analysis_url = "{0}/analyses/{1}".format(get_fame_url(True), analysis_id)
             body = notification_body_tpl.format(commentator['name'],
                                                 analysis_url,
                                                 comment['comment'])
@@ -213,9 +215,14 @@ class File(MongoDict):
 
         # Update previous analysis
         for analysis_id in self['analysis']:
-            analysis = Analysis(store.analysis.find_one({'_id': ObjectId(analysis_id)}))
-            analysis['reviewed'] = self['reviewed']
-            analysis.save()
+            analysis = Analysis.get(_id=analysis_id)
+            if analysis:
+                analysis['reviewed'] = self['reviewed']
+                analysis.save()
+                for extracted_file_id in analysis['extracted_files']:
+                    extracted_file = File.get(_id=extracted_file_id)
+                    if extracted_file:
+                        extracted_file.review(analyst)
 
     # Update existing record
     def _add_to_previous(self, existing_record, name):
@@ -244,9 +251,9 @@ class File(MongoDict):
 
     # Compute default properties
     # For now, just 'name' and 'type'
-    def _compute_default_properties(self, hash_only=False):
+    def _compute_default_properties(self, hash_only=False, filename=''):
         if not hash_only:
-            self['names'] = [os.path.basename(self['filepath'])]
+            self['names'] = [filename]
             self['detailed_type'] = magic.from_file(self['filepath'])
             self['mime'] = magic.from_file(self['filepath'], mime=True)
             self['size'] = os.path.getsize(self['filepath'])
@@ -310,6 +317,8 @@ class File(MongoDict):
                 pass
 
     def _store_file(self, filename, stream):
+        filename = sanitize_filename(filename, self['sha256'])
+
         self['filepath'] = '{0}/{1}'.format(self['sha256'], filename)
         self['filepath'] = os.path.join(fame_config.storage_path, self['filepath'])
 

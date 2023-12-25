@@ -58,6 +58,13 @@ def enrich_comments(obj):
 
     return obj
 
+def enrich_exists_on_fs(f):
+    if f['type'] == 'url' or f['type'] == 'hash':
+        f['exists_on_disk'] = True
+    else:
+        f['exists_on_disk'] = isfile(f['filepath'])
+    return f
+
 
 def clean_files(files):
     files = clean_objects(files, {'': ['filepath']})
@@ -125,7 +132,7 @@ def file_download(filepath):
         with open(filepath, 'rb') as fd:
             response = make_response(fd.read())
 
-        response.headers["Content-Disposition"] = "attachment; filename={0}".format(basename(filepath)).encode('latin-1', errors='ignore')
+        response.headers["Content-Disposition"] = "attachment; filename={0}".format(basename(filepath))
         response.headers["Content-Type"] = "application/binary"
 
         return response
@@ -190,3 +197,33 @@ def comments_enabled():
         comments_enabled = config.get_values()['enable']
 
     return comments_enabled
+
+
+def get_fame_url(default=False):
+    if not ' ' in fame_config.fame_url.strip():
+        return fame_config.fame_url.strip()
+
+    possible_urls = fame_config.fame_url.strip().split(' ')
+    if default or not request:
+        return possible_urls[0].strip()
+
+    for possible_url in possible_urls:
+        if possible_url.strip() and request.url_root[:-1] == possible_url.strip():
+            return possible_url.strip()
+
+    return possible_urls[0].strip()
+
+
+class BeforeAppFirstRequest:
+    funcs = []
+
+    def register(self, func):
+        self.funcs.append(func)
+
+    def execute(self, app):
+        while self.funcs:
+            func = self.funcs.pop()
+            func(app)
+
+
+before_first_request = BeforeAppFirstRequest()

@@ -16,7 +16,7 @@ def auth_token(user):
 def password_reset_token(user):
     signer = TimestampSigner(fame_config.secret_key)
 
-    return signer.sign(str(user['_id']))
+    return signer.sign(str(user['_id'])).decode()
 
 
 def validate_password_reset_token(token):
@@ -51,6 +51,9 @@ def create_user(name, email, groups, default_sharing, permissions, password=None
 
 
 def authenticate(email, password):
+    if not email or not password:
+        return None
+
     user = User.get(email=email.lower())
 
     if user_if_enabled(user):
