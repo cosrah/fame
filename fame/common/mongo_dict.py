@@ -1,4 +1,5 @@
 import collections.abc
+import json
 
 from fame.common.utils import iterify
 from fame.core.store import store
@@ -13,12 +14,21 @@ class MongoDict(dict):
         dict.__init__(self, values)
         self.collection = store.db[self.collection_name]
 
+    def __hash__(self):
+        if '_id' in self:
+            return hash(self['_id'])
+        else:
+            return hash(json.dumps(self, sort_keys=True))
+
     @classmethod
     def get_collection(klass):
         return store.db[klass.collection_name]
 
     @classmethod
     def find(klass, *args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], dict):
+            kwargs |= args[0]
+
         objs = klass.get_collection().find(kwargs)
 
         for obj in objs:
@@ -26,6 +36,9 @@ class MongoDict(dict):
 
     @classmethod
     def get(klass, *args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], dict):
+            kwargs |= args[0]
+
         obj = klass.get_collection().find_one(kwargs)
 
         if obj:
@@ -34,7 +47,7 @@ class MongoDict(dict):
         return obj
 
     def delete(self):
-        self.collection.remove(self["_id"])
+        self.collection.delete_one({"_id": self['_id']})
         del self['_id']
 
     def save(self):

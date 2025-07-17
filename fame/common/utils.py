@@ -64,7 +64,7 @@ def ordered_list_value(list_of_values):
     return result
 
 
-def send_file_to_remote(file, url, filename=''):
+def send_file_to_remote(file, url, filename='', via=None):
     if isinstance(file, str):
         file = open(file, 'rb')
 
@@ -72,7 +72,7 @@ def send_file_to_remote(file, url, filename=''):
         file = (filename, file)
 
     url = urljoin(fame_config.remote, url)
-    response = requests.post(url, files={'file': file}, headers={'X-API-KEY': fame_config.api_key})
+    response = requests.post(url, files={'file': file}, data={'via': via}, headers={'X-API-KEY': fame_config.api_key})
     response.raise_for_status()
 
     if filename:
@@ -122,8 +122,34 @@ def with_timeout(func, timeout, step):
     return None
 
 def sanitize_filename(filename, alternative_name):
-    sanitized_filename = secure_filename(filename)
+    if not filename or len(filename) > 1024:
+        # CVE-2023-46695: avoid using secure_filename() when the name is too long
+        sanitized_filename = alternative_name
+    else:
+        sanitized_filename = secure_filename(str(filename))
+
     if not sanitized_filename or len(sanitized_filename) > 200:
         sanitized_filename = alternative_name
     sanitized_filename = sanitized_filename.replace('-', '_')
     return sanitized_filename
+
+def delete_from_disk(top):
+    fame_path = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    )
+    if not fame_path in top:
+        print(
+            "WARNING: refusing to delete '{}' because it is outside of '{}'.".format(
+                top, fame_path
+            )
+        )
+        return
+    for root, dirs, files in os.walk(top, topdown=False):
+        for name in files:
+            os.remove(os.path.join(root, name))
+        for name in dirs:
+            os.rmdir(os.path.join(root, name))
+    if os.path.isdir(top):
+        os.rmdir(top)
+    elif os.path.isfile(top):
+        os.remove(top)

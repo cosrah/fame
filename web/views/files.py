@@ -101,7 +101,8 @@ class FilesView(FlaskView, UIView):
         :>json list analysis: list of analyses' ObjectIds.
         :>json list parent_analyses: list of analyses (as ObjectIds) that extracted this object.
         :>json dict antivirus: dict with antivirus names as keys.
-        :>json dict reviewed: analyst's ObjectId if review has been performed
+        :>json user reviewed: analyst's ObjectId if review has been performed
+        :>json bool exists_on_disk: True if the file still exists on disk, False otherwise
         """
         file = {"file": enrich_comments(clean_files(enrich_exists_on_fs(get_or_404(current_user.files, _id=id))))}
         return return_file(file)
@@ -166,9 +167,30 @@ class FilesView(FlaskView, UIView):
     @requires_permission("worker")
     def post(self):
         file = request.files["file"]
-        f = File(filename=file.filename, stream=file.stream)
+        via = request.form.get('via')
+
+        f = File(filename=file.filename, stream=file.stream, submitted_via=via)
 
         return render_json({"file": f})
+
+    @route("/<id>", methods=["DELETE"])
+    @requires_permission("delete")
+    def anonymize(self, id):
+        """Anonymize (soft delete) a file from FAME disk. Support files from associated analyses are also removed, if any.
+
+        .. :quickref: File; Anonymize (soft delete) an object.
+
+        :param id: id of the file to anonymize.
+
+        :>json string response: Contain information on the deletion status.
+        """
+        f = File(get_or_404(current_user.files, _id=id))
+        if f:
+            flash("File {} and associated analyses were deleted from disk.".format(id))
+            f.delete(preserve_db=True)
+            return {"response": "ok"}
+
+        return {"response": "File not found"}
 
     def download(self, id):
         """Download the file with `id`.
@@ -272,8 +294,9 @@ class FilesView(FlaskView, UIView):
                 # If there is an analysis ID, make sure it is accessible
                 if analysis_id:
                     get_or_404(current_user.analyses, _id=analysis_id)
+                is_reviewer = current_user.has_permission('review')
 
-                f.add_comment(current_user["_id"], comment, analysis_id, probable_name, notify)
+                f.add_comment(current_user["_id"], comment, analysis_id, probable_name, notify, is_reviewer)
             else:
                 flash("Comment should not be empty", "danger")
 

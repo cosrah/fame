@@ -21,7 +21,10 @@ from fame.core.file import File
 from fame.core.config import Config
 from fame.core.analysis import Analysis
 from fame.core.module import ModuleInfo
-from web.views.negotiation import render, redirect, validation_error
+from web.views.negotiation import (
+    render, redirect, validation_error,
+    should_render_as_html
+)
 from web.views.constants import PER_PAGE
 from web.views.helpers import (
     file_download, get_or_404, requires_permission, clean_analyses,
@@ -195,9 +198,14 @@ class AnalysesView(FlaskView, UIView):
         url = request.form.get('url') or None
         hash = request.form.get('hash') or None
 
+        if should_render_as_html():
+            via = 'Web Interface'
+        else:
+            via = 'API'
+
         f = None
         if file:
-            f = File(filename=file.filename, stream=file.stream)
+            f = File(filename=file.filename, stream=file.stream, submitted_via=via)
         elif url:
             stream = BytesIO(url.encode('utf-8'))
             f = File(filename='url', stream=stream)
@@ -278,7 +286,11 @@ class AnalysesView(FlaskView, UIView):
             return validation_error()
 
         if file_id is not None:
-            f = File(get_or_404(current_user.files, _id=file_id))
+            if should_render_as_html():
+                via = 'Web Interface'
+            else:
+                via = 'API'
+            f = File(get_or_404(current_user.files, _id=file_id), submitted_via=via)
             analysis = {'analysis': f.analyze(groups, current_user['_id'], modules, options)}
             return redirect(analysis, url_for('AnalysesView:get', id=analysis['analysis']['_id']))
         else:
@@ -308,6 +320,14 @@ class AnalysesView(FlaskView, UIView):
 
     @route('/is_safe_url', methods=["POST"])
     def is_safe_url(self):
+        """Check if an URL is considered safe
+
+        .. :quickref: Analysis; Check if a provided URL is considered internal or fully trusted.
+
+        :form string url: URL to check.
+
+        :>json bool is_safe: True if the URL is considered safe, False otherwise.
+        """
         safe = False
         url = request.form.get('url', '').strip().strip('/')
         config = Config.get(name="safe_domains")
@@ -333,7 +353,7 @@ class AnalysesView(FlaskView, UIView):
                             safe = True
                     except ValueError:
                         if domain.startswith('*.'):
-                           if parsed_url.endswith(domain[2:]):
+                           if parsed_url.endswith(domain[1:]) or parsed_url == domain[2:]:
                                safe = True
                         else:
                            if parsed_url == domain:
@@ -347,7 +367,7 @@ class AnalysesView(FlaskView, UIView):
                             safe = False
                     except ValueError:
                         if domain.startswith('*.'):
-                           if parsed_url.endswith(domain[2:]):
+                           if parsed_url.endswith(domain[1:]) or parsed_url == domain[2:]:
                                safe = False
                         else:
                            if parsed_url == domain:

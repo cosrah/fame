@@ -6,7 +6,7 @@ import datetime
 
 from fame.core.store import store
 from fame.common.config import ConfigObject, fame_config
-from fame.common.utils import sanitize_filename
+from fame.common.utils import sanitize_filename, delete_from_disk
 from fame.common.mongo_dict import MongoDict
 from fame.core.module_dispatcher import dispatcher
 from fame.core.config import Config
@@ -38,7 +38,7 @@ class File(MongoDict):
     collection_name = 'files'
 
     def __init__(self, values=None, filename=None, stream=None, create=True,
-                 hash=""):
+                 hash="", submitted_via=None):
         # When only passing a dict
         if isinstance(values, dict):
             self['comments'] = []
@@ -53,11 +53,14 @@ class File(MongoDict):
             self['comments'] = []
             self['analysis'] = []
             self['reviewed'] = None
+            self['submitted_via'] = []
 
             if hash:
                 self._init_with_hash(hash)
             else:
                 self._init_with_file(filename, stream, create)
+            if create:
+                self._set_submitted_via(submitted_via)
 
     def _init_with_hash(self, hash):
         md5, sha1, sha256 = _hash_by_length(hash)
@@ -96,9 +99,9 @@ class File(MongoDict):
         # If the file already exists in the database, update it
         self.existing = False
         existing_file = (
-            self.collection.find_one({'sha256': self['sha256']}) or
-            self.collection.find_one({'sha1': self['sha1']}) or
-            self.collection.find_one({'md5': self['md5']})
+            'sha256' in self and self.collection.find_one({'sha256': self['sha256']}) or
+            'sha1' in self and self.collection.find_one({'sha1': self['sha1']}) or
+            'md5' in self and self.collection.find_one({'md5': self['md5']})
         )
 
         if existing_file:
@@ -106,15 +109,15 @@ class File(MongoDict):
             self.existing = True
 
         # If the file doesn't exist, or exists as a hash submission, compute default properties and save
-        if create and ((existing_file is None) or (self['type'] == 'hash') or not os.path.isfile(self['filepath'])):
+        if create and ((existing_file is None) or ('type' in self and self['type'] == 'hash') or ('filepath' in self and not os.path.isfile(self['filepath']))):
             # if file exists as hash submission: reset review status
-            if existing_file and self['type'] == 'hash':
+            if existing_file and 'type' in self and self['type'] == 'hash':
                 self.review(None)
             self._store_file(filename, stream)
             self._compute_default_properties(filename=filename)
             self.save()
 
-    def add_comment(self, analyst_id, comment, analysis_id=None, probable_name=None, notify=None):
+    def add_comment(self, analyst_id, comment, analysis_id=None, probable_name=None, notify=None, is_reviewer=False):
         if probable_name:
             self.add_probable_name(probable_name)
 
@@ -127,6 +130,10 @@ class File(MongoDict):
         })
         if notify is not None and analysis_id is not None:
             self.notify_new_comment(analysis_id, analyst_id, comment)
+                
+        if not is_reviewer:
+            self.review(None)
+
 
     def notify_new_comment(self, analysis_id, commentator_id, comment):
         commentator = store.users.find_one({'_id': commentator_id})
@@ -316,6 +323,15 @@ class File(MongoDict):
             except:
                 pass
 
+    def _set_submitted_via(self, submitted_via=None):
+        if submitted_via is not None and submitted_via:
+            if isinstance(submitted_via, str):
+                self['submitted_via'].append(submitted_via)
+            elif isinstance(submitted_via, list):
+                self['submitted_via'].extend(submitted_via)
+            self['submitted_via'] = list(set(self['submitted_via']))
+            self.save()
+
     def _store_file(self, filename, stream):
         filename = sanitize_filename(filename, self['sha256'])
 
@@ -331,12 +347,32 @@ class File(MongoDict):
         # Save file contents
         with open(self['filepath'], "wb") as fd:
             while True:
+                if stream is None:
+                    break
                 data = stream.read(4096)
                 if data:
                     fd.write(data)
                 else:
                     stream.seek(0, 0)
                     break
+
+    def delete(self, preserve_db=False):
+        if 'sha256' in self:
+            delete_from_disk(os.path.join(fame_config.storage_path, self['sha256']))
+
+        for objectid in self['analysis']:
+            analysis = Analysis.get(_id=objectid)
+            if analysis:
+                analysis.delete(preserve_db)
+
+        if preserve_db:
+            return
+
+        for analysis_to_update in Analysis.find({"extracted_files": self['_id']}):
+            if analysis_to_update:
+                analysis_to_update.remove_from('extracted_files', self['_id'])
+
+        super().delete()
 
 # For cyclic imports
 from fame.core.analysis import Analysis

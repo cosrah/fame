@@ -1,7 +1,10 @@
 import os
 import requests
+import json
 from flask_login import login_user
 from datetime import datetime
+from josepy.jwk import JWK
+from josepy.jws import JWS
 from jsonpath_ng import jsonpath
 from jsonpath_ng.ext import parse
 from jsonpath_ng.exceptions import JSONPathError
@@ -24,18 +27,18 @@ class ClaimMappingError(Exception):
 def check_oidc_settings_present():
     def _check(name):
         if name not in fame_config:
-            print((name + " not present in config"))
+            print(name + " not present in config")
             return False
         return True
 
     settings = {
-        "oidc_authorize_endpoint",  # https://opURL/oauth2/authorize
-        "oidc_token_endpoint",  # https://opURL/oauth2/access_token
-        "oidc_userinfo_endpoint",  # https://opURL/oauth2/userinfo
-        "oidc_tokeninfo_endpoint",  # https://opURL/oauth2/tokeninfo
-        "oidc_requested_scopes",  # openid profile Scope1 Scope2
-        "oidc_client_id",  # 11111111-1111-1111-1111-111111111111
-        "oidc_client_secret",  # ARandomClientSecret
+        "oidc_authorize_endpoint",
+        "oidc_token_endpoint",
+        "oidc_userinfo_endpoint",
+        "oidc_jwk_uri_endpoint",
+        "oidc_requested_scopes",
+        "oidc_client_id",
+        "oidc_client_secret",
     }
 
     if not all([_check(s) for s in settings]):
@@ -53,7 +56,7 @@ def authenticate_user(oidc_token):
     try:
         userinfo = requests.get(
             fame_config.oidc_userinfo_endpoint,
-            headers={"Authorization": "Bearer " + oidc_token},
+            headers={"Authorization": "Bearer " + oidc_token["access_token"]},
         ).json()
     except requests.exceptions.RequestException as e:
         return ClaimMappingError(
@@ -61,10 +64,33 @@ def authenticate_user(oidc_token):
             % e.args[0]
         )
 
+    access_token = verify_jwt(oidc_token["access_token"])
+    if access_token:
+        userinfo.update(access_token)
+
+    try:
+        id_token = verify_jwt(oidc_token["id_token"])
+        if id_token:
+            userinfo.update(id_token)
+    except KeyError:
+        pass
+
     claim = {}
     for elem in ["email", "name", "role"]:
         try:
-            claim[elem] = parse(USER_CLAIM_MAPPING[elem]).find(userinfo)[0].value
+            if elem == "role":
+                claim["role"] = []
+                for found_role in parse(USER_CLAIM_MAPPING[elem]).find(userinfo):
+                    if isinstance(found_role.value, str):
+                        claim["role"] += found_role.value.split(" ")
+                    elif isinstance(found_role.value, list):
+                        claim["role"] += found_role.value
+                    else:
+                        claim["role"].append(found_role.value)
+                if not claim["role"]:
+                    raise IndexError
+            else:
+                claim[elem] = parse(USER_CLAIM_MAPPING[elem]).find(userinfo)[0].value
         except (ValueError, IndexError):
             if elem == "role":
                 # If user has no role: disable it
@@ -82,9 +108,6 @@ def authenticate_user(oidc_token):
                 f"JSON path of claim '%s' is invalid: '%s'. If you are a FAME administrator, please check the claim path in FAME config files."
                 % (elem, e.args[0])
             )
-
-    if isinstance(claim["role"], str):
-        claim["role"] = claim["role"].split(" ")
 
     role = {}
     for granted_scope in claim["role"]:
@@ -104,7 +127,7 @@ def authenticate_user(oidc_token):
 
         raise ClaimMappingError(
             f"Role(s) found for '%s' (%s) do not allow FAME access."
-            % (userinfo["sub"], ','.join(claim["role"]))
+            % (userinfo["sub"], ",".join(claim["role"]))
         )
 
     user = update_or_create_user(claim["email"], claim["name"], role)
@@ -119,12 +142,19 @@ def authenticate_api(tokeninfo):
     claim = {}
     for elem in ["email", "name", "role"]:
         try:
-            claim[elem] = parse(API_CLAIM_MAPPING[elem]).find(tokeninfo)[0].value
+            if elem == "role":
+                claim["role"] = []
+                for found_role in parse(API_CLAIM_MAPPING[elem]).find(tokeninfo):
+                    if isinstance(found_role.value, str):
+                        claim["role"] += found_role.value.split(" ")
+                    elif isinstance(found_role.value, list):
+                        claim["role"] += found_role.value
+                    else:
+                        claim["role"].append(found_role.value)
+            else:
+                claim[elem] = parse(API_CLAIM_MAPPING[elem]).find(tokeninfo)[0].value
         except (ValueError, IndexError, JSONPathError):
             return None
-
-    if isinstance(claim["role"], str):
-        claim["role"] = claim["role"].split(" ")
 
     role = {}
     for granted_scope in claim["role"]:
@@ -174,3 +204,30 @@ def update_or_create_user(mail, name, role):
         user.generate_avatar()
 
     return user
+
+
+def verify_jwt(token):
+    try:
+        jwks = requests.get(fame_config.oidc_jwk_uri_endpoint).json()
+    except requests.exceptions.RequestException as e:
+        print(
+            "WARNING: Unable to contact the OIDC server: %s. Please check the value of oidc_jwk_uri_endpoint"
+            % e.args[0]
+        )
+        return False
+
+    try:
+        token = JWS.from_compact(token.encode())
+        alg = json.loads(token.signature.protected)["alg"]
+        jwt_content = json.loads(token.payload.decode("utf-8"))
+    except (UnicodeDecodeError, KeyError, json.decoder.JSONDecodeError):
+        # token is not a valid JWT
+        return False
+
+    for jwk in jwks["keys"]:
+        if jwk["alg"] == alg:
+            if token.verify(JWK.from_json(jwk)):
+                return jwt_content
+
+    # token verification failed
+    return False
