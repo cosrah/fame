@@ -335,16 +335,17 @@ class File(MongoDict):
     def _store_file(self, filename, stream):
         filename = sanitize_filename(filename, self['sha256'])
 
-        self['filepath'] = '{0}/{1}'.format(self['sha256'], filename)
+        hash_parts = [self['sha256'][i:i+2] for i in range(0, len(self['sha256']), 2)]
+        hash_path = os.path.join(*hash_parts)
+        
+        self['filepath'] = os.path.join(hash_path, filename)
         self['filepath'] = os.path.join(fame_config.storage_path, self['filepath'])
 
-        # Create parent dirs if they don't exist
         try:
-            os.makedirs(os.path.join(fame_config.storage_path, self['sha256']))
+            os.makedirs(os.path.join(fame_config.storage_path, hash_path))
         except:
             pass
 
-        # Save file contents
         with open(self['filepath'], "wb") as fd:
             while True:
                 if stream is None:
@@ -358,7 +359,9 @@ class File(MongoDict):
 
     def delete(self, preserve_db=False):
         if 'sha256' in self:
-            delete_from_disk(os.path.join(fame_config.storage_path, self['sha256']))
+            hash_parts = [self['sha256'][i:i+2] for i in range(0, len(self['sha256']), 2)]
+            hash_path = os.path.join(*hash_parts)
+            delete_from_disk(os.path.join(fame_config.storage_path, hash_path))
 
         for objectid in self['analysis']:
             analysis = Analysis.get(_id=objectid)
